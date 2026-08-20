@@ -77,10 +77,11 @@ def test_vol_report_with_process_evidence(temp_db, mock_active_session, mock_bac
     assert sp["pid"] == 999
     assert sp["name"] == "evil.exe"
     assert "psscan" in sp["reason"]
-    assert sp["observed"] is True
+    assert sp["classification"] == "inferred"
     # Evidence IDs are preserved
     for ev_id in sp["evidence_ids"]:
         assert ev_id.startswith("ev-")
+    assert len(sp["evidence_ids"]) == len(set(sp["evidence_ids"]))
 
 
 def test_vol_report_with_network_indicators(temp_db, mock_active_session, mock_backend):
@@ -98,12 +99,12 @@ def test_vol_report_with_network_indicators(temp_db, mock_active_session, mock_b
     assert mock_backend.call_count == 0
 
     assert res["data_availability"]["network_connections"] is True
-    # Port 4444 + uncommon process should produce anomalies
     assert len(res["network_indicators"]) > 0
     # All anomalies have evidence_ids list
     for ind in res["network_indicators"]:
         assert "evidence_ids" in ind
-        assert "detail" in ind
+        assert "classification" in ind
+        assert ind["classification"] == "observed"
 
 
 def test_vol_report_with_malfind_evidence(temp_db, mock_active_session, mock_backend):
@@ -125,7 +126,9 @@ def test_vol_report_with_malfind_evidence(temp_db, mock_active_session, mock_bac
     ind = res["injection_indicators"][0]
     assert ind["pid"] == 999
     assert ind["protection"] == "PAGE_EXECUTE_READWRITE"
-    assert ind["evidence_id"].startswith("ev-")
+    assert ind["region"] == "0x1000-0x2000"
+    assert isinstance(ind["evidence_ids"], list)
+    assert ind["evidence_ids"][0].startswith("ev-")
     assert "triage" in ind["analyst_note"]
 
 
@@ -135,7 +138,7 @@ def test_vol_report_with_ssdt_evidence(temp_db, mock_active_session, mock_backen
 
     ssdt_rows = [
         {"Table": "KiServiceTable", "Index": 5, "Offset": 0xfffff800,
-         "Symbol": "hooked_driver!NtCreateFile"},
+         "Symbol": "NtOpenProcess"},
     ]
     run1 = case_session.record_plugin_run(session_id, "win_ssdt", 1, 0)
     evidence_store.store_plugin_evidence(session_id, run1, "win_ssdt", "vol_ssdt", ssdt_rows)
@@ -146,8 +149,21 @@ def test_vol_report_with_ssdt_evidence(temp_db, mock_active_session, mock_backen
     assert res["data_availability"]["kernel_modules"] is True
     assert len(res["kernel_rootkit_indicators"]) == 1
     ind = res["kernel_rootkit_indicators"][0]
-    assert ind["type"] == "ssdt_hook"
-    assert "hooked_driver" in ind["symbol"]
+    assert ind["type"] == "potential_kernel_anomaly"
+    assert ind["symbol"] == "NtOpenProcess"
+    assert ind["classification"] == "inferred"
+    assert "evidence_ids" in ind
+
+
+def test_vol_report_with_linux_bash(temp_db, mock_active_session, mock_backend):
+    """Report surfaces bash history indicators."""
+    session_id = mock_active_session.return_value["id"]
+    bash_rows = [{"command": "rm -rf /", "user": "root"}]
+    run1 = case_session.record_plugin_run(session_id, "linux_bash", 1, 0)
+    evidence_store.store_plugin_evidence(session_id, run1, "linux_bash", "linux_bash", bash_rows)
+
+    res = mcp_server.vol_report()
+    assert res["data_availability"]["bash_history"] is True
 
 
 def test_vol_report_backend_never_called(temp_db, mock_active_session, mock_backend):

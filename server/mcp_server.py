@@ -984,7 +984,7 @@ def vol_report() -> dict:
             "anomaly_count": r["anomaly_count"],
             "ran_at": r["ran_at"],
         }
-        for r in plugin_runs
+        for r in sorted(plugin_runs, key=lambda x: x["ran_at"])
     ]
     total_anomalies = sum(r["anomaly_count"] for r in plugin_runs)
 
@@ -997,7 +997,7 @@ def vol_report() -> dict:
             "source": f.get("source"),
             "created_at": f["created_at"],
         }
-        for f in findings_raw
+        for f in sorted(findings_raw, key=lambda x: x["created_at"])
     ]
 
     # ── 4. Evidence summary by category ──────────────────────────────────────
@@ -1028,8 +1028,8 @@ def vol_report() -> dict:
                 "name": a["process"],
                 "ppid": a["ppid"],
                 "reason": "present in psscan but absent from pstree (potential DKOM unlinking)",
-                "evidence_ids": a.get("evidence_ids", []),
-                "observed": True,
+                "evidence_ids": list(set(a.get("evidence_ids", []))),
+                "classification": "inferred",
             })
 
     # Linux hidden processes
@@ -1047,9 +1047,11 @@ def vol_report() -> dict:
                 "name": a["process"],
                 "ppid": a["ppid"],
                 "reason": "present in psscan but absent from pslist (potential DKOM unlinking)",
-                "evidence_ids": a.get("evidence_ids", []),
-                "observed": True,
+                "evidence_ids": list(set(a.get("evidence_ids", []))),
+                "classification": "inferred",
             })
+
+    suspicious_processes.sort(key=lambda x: x["pid"] or 0)
 
     # ── 6. Network indicators ─────────────────────────────────────────────────
     netscan_ev = evidence_store.search_evidence(session_id, plugin="win_netscan")
@@ -1057,19 +1059,44 @@ def vol_report() -> dict:
     all_net_ev = netscan_ev + sockstat_ev
 
     network_indicators = []
-    if all_net_ev:
-        net_rows = [e["raw"] for e in all_net_ev]
-        combined_ev_map = {}
-        for e in all_net_ev:
-            if e.get("entity_id"):
-                combined_ev_map.setdefault(e["entity_id"], []).append(e["evidence_id"])
-        net_analysis = win_netscan_filter.analyze(net_rows, combined_ev_map)
-        for a in net_analysis.get("anomalies", []):
+
+    def _is_local(addr: str) -> bool:
+        if not addr:
+            return True
+        return str(addr).startswith(("127.", "0.0.0.0", "::", "169.254.", "*"))
+
+    for e in all_net_ev:
+        raw = e["raw"]
+        pid = e.get("entity_id") or raw.get("Pid") or raw.get("PID")
+        proc = e.get("entity_name") or raw.get("Owner") or raw.get("Process") or raw.get("Comm") or raw.get("COMM")
+        local_port = raw.get("LocalPort") or raw.get("Local Port") or raw.get("Port")
+        local_addr = raw.get("LocalAddr") or raw.get("Local Addr") or raw.get("Source Addr")
+        foreign_port = raw.get("ForeignPort") or raw.get("Foreign Port") or raw.get("Destination Port")
+        foreign_addr = raw.get("ForeignAddr") or raw.get("Foreign Addr") or raw.get("Destination Addr")
+        state = raw.get("State", "")
+        
+        # Include non-local or listening ports as relevant observations
+        is_relevant = False
+        if state in ("LISTENING", "LISTEN"):
+            is_relevant = True
+        elif foreign_addr and not _is_local(foreign_addr):
+            is_relevant = True
+        elif state == "ESTABLISHED":
+            is_relevant = True
+            
+        if is_relevant:
             network_indicators.append({
-                "type": a.get("type"),
-                "detail": a.get("detail"),
-                "evidence_ids": a.get("evidence_ids", []),
+                "pid": pid,
+                "process_name": proc,
+                "local_endpoint": f"{local_addr}:{local_port}" if local_addr else str(local_port),
+                "remote_endpoint": f"{foreign_addr}:{foreign_port}" if foreign_addr else str(foreign_port),
+                "state": state,
+                "plugin": e.get("plugin", ""),
+                "evidence_ids": [e["evidence_id"]],
+                "classification": "observed",
             })
+
+    network_indicators.sort(key=lambda x: (x.get("pid") or 0, x.get("remote_endpoint") or ""))
     net_available = len(all_net_ev) > 0
 
     # ── 7. Memory / injection indicators (malfind) ────────────────────────────
@@ -1081,9 +1108,12 @@ def vol_report() -> dict:
             "pid": raw.get("PID") or raw.get("Pid"),
             "process": raw.get("Process") or raw.get("ImageFileName") or raw.get("COMM"),
             "protection": raw.get("Protection", ""),
-            "evidence_id": e["evidence_id"],
-            "analyst_note": "Unbacked executable memory region detected. Requires manual triage — may be JIT or legitimate driver activity.",
+            "region": f"{raw.get('Start VPN')}-{raw.get('End VPN')}",
+            "evidence_ids": [e["evidence_id"]],
+            "analyst_note": "Observed unbacked executable memory region. Requires triage to confirm maliciousness (may be JIT).",
+            "classification": "observed",
         })
+    injection_indicators.sort(key=lambda x: (x.get("pid") or 0, x.get("region") or ""))
     malfind_available = len(malfind_ev) > 0
 
     # ── 8. Kernel / rootkit indicators (modules + SSDT) ───────────────────────
@@ -1102,10 +1132,11 @@ def vol_report() -> dict:
         mod_analysis = hidden_modules_filter.analyze(lsmod_rows, check_rows, check_modules_evidence_map=check_ev_map)
         for f in mod_analysis.get("flagged", []):
             kernel_indicators.append({
-                "type": "hidden_kernel_module",
+                "type": "potential_kernel_anomaly",
                 "module": f.get("module"),
                 "detail": f.get("detail", ""),
-                "evidence_ids": f.get("evidence_ids", []),
+                "evidence_ids": list(set(f.get("evidence_ids", []))),
+                "classification": "inferred",
             })
 
     # Windows SSDT hooks
@@ -1119,12 +1150,15 @@ def vol_report() -> dict:
         ssdt_analysis = ssdt_filter.analyze(ssdt_rows, ssdt_ev_map)
         for a in ssdt_analysis.get("anomalies", []):
             kernel_indicators.append({
-                "type": "ssdt_hook",
+                "type": "potential_kernel_anomaly",
                 "symbol": a.get("symbol"),
                 "detail": a.get("detail", ""),
                 "analyst_note": a.get("analyst_note", ""),
-                "evidence_ids": a.get("evidence_ids", []),
+                "evidence_ids": list(set(a.get("evidence_ids", []))),
+                "classification": "inferred",
             })
+
+    kernel_indicators.sort(key=lambda x: (x.get("type") or "", x.get("module") or x.get("symbol") or ""))
 
     # ── 9. Timeline summary ────────────────────────────────────────────────────
     timeline_result = timeline_filter.build_timeline(all_evidence, limit=20)
@@ -1132,12 +1166,16 @@ def vol_report() -> dict:
     timeline_available = timeline_result.get("event_count", 0) > 0
 
     # ── 10. Data availability checklist ──────────────────────────────────────
+    bash_ev = evidence_store.search_evidence(session_id, plugin="linux_bash")
+    bash_available = len(bash_ev) > 0
+
     availability = {
         "process_listing": bool(pstree_ev or pslist_ev),
         "process_scan": bool(psscan_ev or linux_psscan_ev),
         "network_connections": net_available,
         "memory_injection_scan": malfind_available,
         "kernel_modules": bool(lsmod_ev or ssdt_ev),
+        "bash_history": bash_available,
         "analyst_findings": bool(analyst_findings),
         "timeline": timeline_available,
     }
@@ -1146,12 +1184,14 @@ def vol_report() -> dict:
     limitations = [
         "This report is derived entirely from stored evidence in the current session. "
         "It does not reflect a live system state.",
+        "Timeline preview is limited to the first 20 chronological events. Use vol_timeline for the full chronological record.",
         "Injection indicators (malfind) require manual analyst triage to distinguish "
         "legitimate JIT/security software from genuine malware.",
         "SSDT hook detection may produce false positives for security products and EDR agents.",
         "Hidden process detection compares list-walk vs pool-scan; advanced kernel manipulations "
         "that tamper with both may evade this heuristic.",
         "No attacker attribution is made in this report.",
+        "If an evidence category is marked unavailable, it means no data was collected for that category; it does NOT prove the absence of malicious activity."
     ]
     if not availability["process_scan"]:
         limitations.append("No memory pool scan evidence is available. Hidden process detection was not performed.")
@@ -1178,7 +1218,7 @@ def vol_report() -> dict:
             "Every indicator above contains evidence_ids linking back to the raw "
             "Volatility records in the evidence store. Use evidence_get(evidence_id) "
             "to retrieve full raw records."
-        ),
+        )
     }
 
 

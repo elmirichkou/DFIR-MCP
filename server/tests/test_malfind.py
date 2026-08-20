@@ -455,7 +455,7 @@ def test_vol_malfind_report_surfaces_evidence(
 
     assert rep["data_availability"]["memory_injection_scan"] is True
     assert len(rep["injection_indicators"]) == 2
-    assert rep["injection_indicators"][0]["evidence_id"].startswith("ev-")
+    assert rep["injection_indicators"][0]["evidence_ids"][0].startswith("ev-")
 
 
 # ── Requirement 20: No malfind → no fabricated indicators ────────────────────
