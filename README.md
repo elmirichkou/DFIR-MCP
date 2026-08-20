@@ -1,14 +1,25 @@
 # dfir-mcp
 
-Volatility 3 memory-forensics triage exposed as MCP tools, so an LLM can
-drive a first-pass investigation of a memory image and flag anomalies
-instead of you reading raw plugin output line by line.
+An MCP (Model Context Protocol) server that lets AI agents perform real
+memory forensics via Volatility 3 — with cryptographically verified,
+session-isolated evidence storage so findings can't be hallucinated.
 
-Phase 1 (this scaffold): Volatility 3 only — `pstree` and `netscan`,
-with a filter layer that turns raw rows into short, structured anomaly
-summaries. Designed to extend later with Eric Zimmerman's tools (disk
-artifacts) and oletools (malicious documents) as separate tool families,
-without touching this code.
+Every plugin run is normalized, stored in a SHA-256-hashed SQLite
+evidence ledger, and scoped to an isolated investigation session.
+Analytical tools (hidden-process correlation, timeline building, report
+generation) query **only** that stored evidence — they never re-run
+Volatility, and they never invent a PID, connection, or timestamp that
+wasn't actually observed.
+
+**Currently implemented:** process tree & network connection triage,
+DKOM-hidden process/module detection, malfind-based injection
+detection, Windows SSDT/module analysis, Linux bash-history
+acquisition, evidence-based timelines, and structured case
+reporting — for both Windows and Linux memory images.
+
+Designed to extend later with Eric Zimmerman's tools (disk artifacts)
+and oletools (malicious documents) as separate tool families, without
+touching this code.
 
 ## Architecture
 
@@ -98,6 +109,53 @@ DKOM-hidden process and a self-hiding kernel module in prior memory
 forensics work — it's worth running these on any case where something
 in `pstree`/`netscan` doesn't add up.
 
+## MCP tools reference
+
+### Session management
+
+| Tool | Description |
+|---|---|
+| `session_create` | Start a new investigation session against a raw memory image. Args: `case_name`, `image_path`, `os` ("windows" or "linux"). |
+| `session_status` | Get info about the currently active session — case name, image path, OS, evidence/plugin-run counts. |
+
+### Acquisition (Volatility plugin wrappers)
+
+| Tool | Plugin | Platform |
+|---|---|---|
+| `vol_pstree` | `windows.pstree` / `linux.pstree` | Both |
+| `vol_netscan` | `windows.netscan` / `linux.sockstat` | Both |
+| `vol_malfind` | `windows.malfind.Malfind` / `linux.malfind.Malfind` | Both |
+| `vol_modules` | `windows.modules.Modules` | Windows only |
+| `vol_ssdt` | `windows.ssdt.SSDT` | Windows only |
+| `vol_bash` | `linux.bash.Bash` | Linux only |
+
+Each acquisition tool returns execution status, a flagged-anomaly list,
+a structured summary, and the associated `evidence_ids` — not the raw
+plugin dump. Results are cached by memory-image content hash, so
+re-running a plugin against the same image returns instantly instead of
+re-executing Volatility.
+
+### Correlation & investigation (stored evidence only — no plugin execution)
+
+| Tool | Description |
+|---|---|
+| `vol_hidden_processes` | Cross-references pslist/pstree against psscan to catch DKOM-hidden processes. |
+| `vol_hidden_modules` | Cross-references lsmod against `linux.check_modules` to catch self-hiding rootkit kernel modules (Linux only). |
+| `vol_investigate_hidden` | Correlates Linux hidden processes with stored network connections and bash history. |
+| `vol_windows_investigate_hidden` | Correlates Windows hidden processes with stored network connections, malfind regions, kernel modules, and SSDT hooks. |
+| `vol_timeline` | Builds a unified chronological timeline from timestamped evidence already stored in the session. |
+| `vol_report` | Generates a structured, fully evidence-backed DFIR case report. |
+
+### Evidence management & chain of custody
+
+| Tool | Description |
+|---|---|
+| `evidence_get` | Retrieve a complete evidence record by ID, including provenance and integrity metadata. |
+| `evidence_search` | Search evidence by `entity_type`, `entity_id`, `evidence_type`, `plugin`, or `session_id`. |
+| `evidence_verify` | Recompute and compare the SHA-256 hash of a stored record to detect tampering. Returns `verified`, `integrity_failure`, `unverified`, or `not_found`. |
+| `finding_add` | Pin an analyst/LLM observation to the case's findings log. |
+| `finding_list` | List all findings pinned to the active case. |
+
 ## Verifying the Volatility JSON schema
 
 Volatility 3's JSON field names can shift slightly between versions.
@@ -114,10 +172,10 @@ Check that `rows[0].keys()` matches what `filters/pstree.py` expects
 (`PID`, `PPID`, `ImageFileName`) — adjust the `.get()` aliases in the
 filter modules if your Volatility version names them differently.
 
-## vol_timeline — Evidence-based chronological timeline
+## vol_timeline — evidence-based chronological timeline
 
 `vol_timeline` builds a unified chronological timeline from evidence
-already stored in the active investigation session.  It does **not**
+already stored in the active investigation session. It does **not**
 execute any Volatility plugins — it reads only from the evidence ledger,
 demonstrating that the evidence store supports higher-level forensic
 analysis without re-running acquisition.
@@ -126,9 +184,9 @@ analysis without re-running acquisition.
 
 After running acquisition tools (`vol_pstree`, `vol_netscan`, etc.),
 call `vol_timeline` to see a combined, time-ordered view of everything
-collected so far.  Evidence records that contain a genuine forensic
+collected so far. Evidence records that contain a genuine forensic
 timestamp (currently only `linux_bash` via its `CommandTime` field)
-produce **temporal events** sorted chronologically.  All other evidence
+produce **temporal events** sorted chronologically. All other evidence
 sources (process records, network connections, kernel modules) produce
 **contextual events** — they carry forensic value but cannot be placed
 on a timeline, so they appear after temporal events in a deterministic
@@ -136,18 +194,18 @@ order.
 
 ### Supported evidence sources
 
-| Plugin              | Evidence type        | Temporal? | Timestamp field             |
-|---------------------|----------------------|-----------|-----------------------------|
-| `linux_bash`        | bash_history         | Yes       | `CommandTime` / `Command Time` |
-| `linux_pslist`      | process_record       | No        | —                           |
-| `linux_psscan`      | process_record       | No        | —                           |
-| `linux_pstree`      | process_record       | No        | —                           |
-| `win_pstree`        | process_record       | No        | —                           |
-| `win_psscan`        | process_record       | No        | —                           |
-| `linux_sockstat`    | network_connection   | No        | —                           |
-| `win_netscan`       | network_connection   | No        | —                           |
-| `linux_lsmod`       | kernel_module        | No        | —                           |
-| `linux_check_modules` | suspicious_module  | No        | —                           |
+| Plugin | Evidence type | Temporal? | Timestamp field |
+|---|---|---|---|
+| `linux_bash` | bash_history | Yes | `CommandTime` / `Command Time` |
+| `linux_pslist` | process_record | No | — |
+| `linux_psscan` | process_record | No | — |
+| `linux_pstree` | process_record | No | — |
+| `win_pstree` | process_record | No | — |
+| `win_psscan` | process_record | No | — |
+| `linux_sockstat` | network_connection | No | — |
+| `win_netscan` | network_connection | No | — |
+| `linux_lsmod` | kernel_module | No | — |
+| `linux_check_modules` | suspicious_module | No | — |
 
 ### Filtering options
 
@@ -165,35 +223,47 @@ order.
 ### Evidence provenance
 
 Every timeline event contains an `evidence_ids` array pointing to the
-exact underlying SQLite evidence records.  No IDs are fabricated — if a
+exact underlying SQLite evidence records. No IDs are fabricated — if a
 mapping cannot be established, the array is empty.
 
-## vol_bash — Linux Bash history acquisition
+## vol_bash — Linux bash history acquisition
 
-`vol_bash` runs the Volatility 3 `linux.bash.Bash` plugin to extract bash history from memory.
-Only supported for Linux cases.
+`vol_bash` runs the Volatility 3 `linux.bash.Bash` plugin to extract
+bash history from memory. Only supported for Linux cases.
 
-It retrieves Bash history that is resident in memory, stores raw evidence in the evidence ledger, preserves `evidence_ids` for provenance, and integrates seamlessly with `vol_timeline` and `vol_investigate_hidden`. Cached executions do not rerun Volatility.
+It retrieves bash history that is resident in memory, stores raw
+evidence in the evidence ledger, preserves `evidence_ids` for
+provenance, and integrates seamlessly with `vol_timeline` and
+`vol_investigate_hidden`. Cached executions do not rerun Volatility.
 
-**Important Forensic Limitation:**
-Bash history is memory-resident evidence. An empty result does NOT necessarily prove that no commands were executed. History may have been cleared, disabled, unavailable, or simply no longer resident in the captured memory image. An empty list is observed evidence, not proof of absence.
+**Important forensic limitation:** Bash history is memory-resident
+evidence. An empty result does **not** necessarily prove that no
+commands were executed. History may have been cleared, disabled,
+unavailable, or simply no longer resident in the captured memory image.
+An empty list is observed evidence, not proof of absence.
 
-## vol_malfind — Suspicious memory region detection
+## vol_malfind — suspicious memory region detection
 
-`vol_malfind` runs the Volatility 3 `malfind` plugin to identify memory regions exhibiting characteristics associated with code injection or suspicious executable memory.
+`vol_malfind` runs the Volatility 3 `malfind` plugin to identify memory
+regions exhibiting characteristics associated with code injection or
+suspicious executable memory.
 
 ### Platform support
 
-| Session OS | Backend plugin                  |
-|------------|---------------------------------|
-| Windows    | `windows.malfind.Malfind`       |
-| Linux      | `linux.malfind.Malfind`         |
+| Session OS | Backend plugin |
+|---|---|
+| Windows | `windows.malfind.Malfind` |
+| Linux | `linux.malfind.Malfind` |
 
-The tool automatically selects the correct plugin based on the active session's OS. Unsupported OS values are rejected with a structured error.
+The tool automatically selects the correct plugin based on the active
+session's OS. Unsupported OS values are rejected with a structured
+error.
 
 ### What malfind actually detects
 
-Malfind identifies private, executable memory regions that lack a backing file on disk (i.e., they are not mapped from a DLL, shared library, or other file). These regions are commonly associated with:
+Malfind identifies private, executable memory regions that lack a
+backing file on disk (i.e., they are not mapped from a DLL, shared
+library, or other file). These regions are commonly associated with:
 - Process hollowing / code injection
 - Reflective DLL injection
 - Shellcode residing in allocated memory
@@ -201,56 +271,83 @@ Malfind identifies private, executable memory regions that lack a backing file o
 
 ### Forensic classification
 
-> **Important:** A malfind hit is **NOT** by itself proof of malware or process injection. Legitimate software, security products, JIT/runtime behavior, and other mechanisms can produce suspicious-looking memory regions. Every finding uses the conservative label `suspicious_memory_region` and requires manual analyst triage.
+> **Important:** A malfind hit is **NOT** by itself proof of malware or
+> process injection. Legitimate software, security products, JIT/runtime
+> behavior, and other mechanisms can produce suspicious-looking memory
+> regions. Every finding uses the conservative label
+> `suspicious_memory_region` and requires manual analyst triage.
 
-Results distinguish **observed** facts (fields directly present in Volatility output) from **inferred** conclusions. No scoring model or automatic malware declaration is used.
+Results distinguish **observed** facts (fields directly present in
+Volatility output) from **inferred** conclusions. No scoring model or
+automatic malware declaration is used.
 
 ### Normalized output
 
-Each finding contains only fields that are actually present in the raw Volatility row:
+Each finding contains only fields that are actually present in the raw
+Volatility row:
 
-| Field         | Description                                           | Platform    |
-|---------------|-------------------------------------------------------|-------------|
-| `pid`         | Process ID                                            | Both        |
-| `process`     | Process name                                          | Both        |
-| `address`     | Memory region (Start VPN – End VPN)                   | Both        |
-| `protection`  | Memory protection flags                               | Both        |
-| `hexdump`     | First 3 lines of hex dump                             | Both        |
-| `disassembly` | First 5 lines of disassembly                          | Both        |
-| `mapping`     | VMA mapping (e.g. `[heap]`, `[stack]`)                | Linux       |
-| `platform`    | `"windows"` or `"linux"`                              | Both        |
-| `reason`      | Conservative classification (`suspicious_memory_region`) | Both     |
-| `evidence_ids`| Provenance links to the SQLite evidence store         | Both        |
+| Field | Description | Platform |
+|---|---|---|
+| `pid` | Process ID | Both |
+| `process` | Process name | Both |
+| `address` | Memory region (Start VPN – End VPN) | Both |
+| `protection` | Memory protection flags | Both |
+| `hexdump` | First 3 lines of hex dump | Both |
+| `disassembly` | First 5 lines of disassembly | Both |
+| `mapping` | VMA mapping (e.g. `[heap]`, `[stack]`) | Linux |
+| `platform` | `"windows"` or `"linux"` | Both |
+| `reason` | Conservative classification (`suspicious_memory_region`) | Both |
+| `evidence_ids` | Provenance links to the SQLite evidence store | Both |
 
 Missing or absent fields are omitted rather than fabricated.
 
 ### Evidence and provenance
 
-Every malfind finding carries real `evidence_ids` linking back to the SQLite evidence store. The complete raw Volatility dictionary is preserved intact. Use `evidence_get(evidence_id)` to retrieve the full original record.
+Every malfind finding carries real `evidence_ids` linking back to the
+SQLite evidence store. The complete raw Volatility dictionary is
+preserved intact. Use `evidence_get(evidence_id)` to retrieve the full
+original record.
 
 ### Caching
 
-Results are cached using the existing image-content-aware cache (SHA-256 of the memory image). A cache hit returns the same `evidence_ids` without re-executing Volatility.
+Results are cached using the existing image-content-aware cache
+(SHA-256 of the memory image). A cache hit returns the same
+`evidence_ids` without re-executing Volatility.
 
 ### Correlation and report integration
 
-- **`vol_windows_investigate_hidden()`** automatically correlates stored `win_malfind` evidence by PID when profiling hidden processes.
-- **`vol_investigate_hidden()`** (Linux) does not currently query malfind evidence, but stored `linux_malfind` records remain available for manual analyst queries via `evidence_search`.
-- **`vol_report()`** surfaces malfind evidence in the `injection_indicators` section with provenance. The `data_availability.memory_injection_scan` flag honestly reports whether malfind evidence was collected. Missing malfind evidence is never silently interpreted as "no injection detected."
+- **`vol_windows_investigate_hidden()`** automatically correlates
+  stored `win_malfind` evidence by PID when profiling hidden processes.
+- **`vol_investigate_hidden()`** (Linux) does not currently query
+  malfind evidence, but stored `linux_malfind` records remain available
+  for manual analyst queries via `evidence_search`.
+- **`vol_report()`** surfaces malfind evidence in the
+  `injection_indicators` section with provenance. The
+  `data_availability.memory_injection_scan` flag honestly reports
+  whether malfind evidence was collected. Missing malfind evidence is
+  never silently interpreted as "no injection detected."
 
 ### Limitations and false positives
 
-- Results depend on the quality and compatibility of the memory image and Volatility symbols.
-- JIT compilers (Java, .NET CLR, V8/SpiderMonkey), security products (EDR, AV), and legitimate software that allocates executable memory will produce findings indistinguishable from injection.
-- Linux `malfind` output may contain fewer fields than the Windows equivalent depending on the Volatility 3 version and kernel profile.
-- An empty malfind result does **not** prove that no injection occurred — advanced techniques (e.g., remapping protections post-injection) may evade detection.
-
+- Results depend on the quality and compatibility of the memory image
+  and Volatility symbols.
+- JIT compilers (Java, .NET CLR, V8/SpiderMonkey), security products
+  (EDR, AV), and legitimate software that allocates executable memory
+  will produce findings indistinguishable from injection.
+- Linux `malfind` output may contain fewer fields than the Windows
+  equivalent depending on the Volatility 3 version and kernel profile.
+- An empty malfind result does **not** prove that no injection
+  occurred — advanced techniques (e.g., remapping protections
+  post-injection) may evade detection.
 
 ## vol_modules — Windows kernel module enumeration
 
-`vol_modules` runs the Volatility 3 `windows.modules.Modules` plugin. It enumerates the natively loaded kernel modules and drivers. This tool provides a baseline observed state. (For detecting hidden modules, use `vol_hidden_modules` instead).
+`vol_modules` runs the Volatility 3 `windows.modules.Modules` plugin.
+It enumerates the natively loaded kernel modules and drivers, providing
+a baseline observed state. (For detecting hidden modules, use
+`vol_hidden_modules` instead.)
 
-The output will contain:
+The output contains:
 - Module name
 - Base address
 - Size
@@ -258,26 +355,41 @@ The output will contain:
 
 ## vol_ssdt — Windows SSDT analysis
 
-`vol_ssdt` runs the Volatility 3 `windows.ssdt.SSDT` plugin. It lists the System Service Descriptor Table (SSDT) entries to identify potential kernel-mode hooks.
+`vol_ssdt` runs the Volatility 3 `windows.ssdt.SSDT` plugin. It lists
+the System Service Descriptor Table (SSDT) entries to identify
+potential kernel-mode hooks.
 
 **What constitutes a suspicious indicator:**
-- entries in `KiServiceTable` that point outside of the expected kernel image (`ntoskrnl.exe`).
-- entries in `W32pServiceTable` that point outside of `win32k.sys`.
-- entries pointing to unknown modules or memory regions without resolved symbols.
+- Entries in `KiServiceTable` that point outside of the expected kernel
+  image (`ntoskrnl.exe`).
+- Entries in `W32pServiceTable` that point outside of `win32k.sys`.
+- Entries pointing to unknown modules or memory regions without
+  resolved symbols.
 
-**Limitations and False-Positive Considerations:**
-- Antivirus, host protection systems (EDR), and virtualization/sandbox solutions legitimately hook the SSDT to monitor system activity.
-- The presence of an SSDT hook is *not* immediate proof of a rootkit or malware. It simply indicates kernel interception. Each hook must be manually triaged by cross-referencing the offset against known drivers.
+**Limitations and false-positive considerations:**
+- Antivirus, host protection systems (EDR), and virtualization/sandbox
+  solutions legitimately hook the SSDT to monitor system activity.
+- The presence of an SSDT hook is *not* immediate proof of a rootkit or
+  malware. It simply indicates kernel interception. Each hook must be
+  manually triaged by cross-referencing the offset against known
+  drivers.
 
 ## vol_windows_investigate_hidden — Windows correlation tool
 
-`vol_windows_investigate_hidden` correlates Windows hidden processes (found via the walk vs scan discrepancy) with other existing evidence (network connections, malfind regions, kernel modules, SSDT hooks).
+`vol_windows_investigate_hidden` correlates Windows hidden processes
+(found via the walk-vs-scan discrepancy) with other existing evidence
+(network connections, malfind regions, kernel modules, SSDT hooks).
 
-It operates **entirely on stored evidence** in the active session and does not trigger new Volatility plugin runs, preserving the forensic audit log.
+It operates **entirely on stored evidence** in the active session and
+does not trigger new Volatility plugin runs, preserving the forensic
+audit log.
 
-## vol_report — Structured investigation report
+## vol_report — structured investigation report
 
-`vol_report` compiles a complete DFIR case report from all evidence and findings stored in the active session. It does **not** execute any Volatility plugins — it reads only from the SQLite evidence ledger, findings log, and plugin run history.
+`vol_report` compiles a complete DFIR case report from all evidence and
+findings stored in the active session. It does **not** execute any
+Volatility plugins — it reads only from the SQLite evidence ledger,
+findings log, and plugin run history.
 
 ### Report schema
 
@@ -357,41 +469,68 @@ It operates **entirely on stored evidence** in the active session and does not t
 
 ### Provenance strategy
 
-- **No fabrication rule**: only data actually stored in the evidence ledger appears in the report.
-- **`evidence_ids` in every indicator**: each `suspicious_processes`, `network_indicators`,
-  `injection_indicators`, and `kernel_rootkit_indicators` entry carries the exact `ev-*` ID(s)
-  of the underlying Volatility row(s). Use `evidence_get()` to drill down.
-- **Observed vs inferred**: fields are labelled `"observed": true` for raw Volatility data;
-  inferences (like "potential DKOM") appear in `reason` / `analyst_note` prose, not facts.
-- **Data availability checklist**: if a category of evidence was never collected,
-  `data_availability.<category>` is `false` and a corresponding entry appears in `limitations`
-  rather than fabricating an empty list silently.
-- **Analyst findings** are distinct from observed indicators — they represent the analyst's
-  (or LLM's) pinned conclusions, surfaced with their original `source` annotation.
+- **No fabrication rule** — only data actually stored in the evidence
+  ledger appears in the report.
+- **`evidence_ids` in every indicator** — each `suspicious_processes`,
+  `network_indicators`, `injection_indicators`, and
+  `kernel_rootkit_indicators` entry carries the exact `ev-*` ID(s) of
+  the underlying Volatility row(s). Use `evidence_get()` to drill down.
+- **Observed vs. inferred** — fields are labelled `"observed": true`
+  for raw Volatility data; inferences (like "potential DKOM") appear in
+  `reason` / `analyst_note` prose, not facts.
+- **Data availability checklist** — if a category of evidence was
+  never collected, `data_availability.<category>` is `false` and a
+  corresponding entry appears in `limitations` rather than fabricating
+  an empty list silently.
+- **Analyst findings** are distinct from observed indicators — they
+  represent the analyst's (or LLM's) pinned conclusions, surfaced with
+  their original `source` annotation.
 
-### What `vol_report` does NOT do
+### What vol_report does NOT do
 
 - Does not execute Volatility plugins.
 - Does not make attacker attribution claims.
-- Does not classify processes as malware — it flags indicators and leaves triage to the analyst.
+- Does not classify processes as malware — it flags indicators and
+  leaves triage to the analyst.
 - Does not invent timestamps, PIDs, addresses, or connections.
 
-## Roadmap
+## Evidence Integrity Layer
 
-- [x] Phase 1: `pstree`, `netscan`, session management, findings log — Linux and Windows
-- [x] Phase 1.5: `vol_hidden_processes` (pslist/pstree vs psscan), `vol_hidden_modules`
-      (lsmod vs check_modules) — DKOM and self-hiding-module detection
-- [x] Phase 1.6: `vol_timeline` — evidence-based chronological timeline
-- [x] Phase 2: `malfind` wired into a tool — memory injection detection
-- [x] Phase 2.5: `modules` wired into a tool — Windows kernel module enumeration
-- [x] Phase 2.6: `ssdt` wired into a tool — Windows SSDT hook analysis
-- [x] Phase 2.7: `vol_windows_investigate_hidden` — Windows hidden process correlation
-- [x] Phase 3: `vol_report` — structured JSON case report from stored evidence
-- [ ] Phase 4: Eric Zimmerman tools (MFTECmd, AmcacheParser, PECmd) as a
-      second tool family for disk artifacts — separate backend image
-      stage (.NET runtime), separate `filters/` modules, separate MCP
-      tools. No changes needed to the Volatility code above.
-- [ ] Phase 5: oletools for malicious-document triage
+DFIR-MCP implements a cryptographic evidence-integrity layer to ensure
+that stored forensic evidence has not been tampered with.
+
+### SHA-256 hashing
+
+Every raw Volatility evidence record is canonicalized into a
+deterministic JSON representation (independent of dictionary key
+ordering, whitespace, or mutable metadata like timestamps). This
+payload is hashed using SHA-256 and stored as `integrity_hash` in the
+database.
+
+### Evidence verification
+
+You can verify the cryptographic integrity of any evidence record using
+the `evidence_verify` tool. This tool enforces session isolation, reads
+the record directly from the database, recomputes the SHA-256 hash, and
+compares it to the stored hash.
+
+It returns one of these statuses:
+- **verified** — the recomputed hash matches the stored hash perfectly; the evidence is intact.
+- **integrity_failure** — the recomputed hash does not match; the evidence record (raw data or derived attributes) has been modified or corrupted since it was stored.
+- **unverified** — the record was collected before the integrity feature was implemented (legacy data) and lacks a stored hash.
+- **not_found** — no evidence record exists for the given ID.
+
+Legacy sessions are handled gracefully: a safe `ALTER TABLE` migration
+maps pre-existing records without an `integrity_hash` to `"unverified"`
+without erasing any historical evidence.
+
+### Limitations
+
+Cryptographic integrity only proves that the record in the SQLite
+database has not changed since it was generated by the Volatility
+plugin. It does not prove that the original memory image itself was
+authentic, nor does it protect against tampering that occurred prior to
+memory acquisition.
 
 ## Safety notes
 
@@ -404,20 +543,28 @@ It operates **entirely on stored evidence** in the active session and does not t
 - This is for authorized forensic work on images you own or are
   authorized to analyze (e.g. CTF/Sherlock challenges, your own lab).
 
-## Evidence Integrity Layer
+## Roadmap
 
-DFIR-MCP implements a cryptographic evidence-integrity layer to ensure that stored forensic evidence has not been tampered with.
+- [x] Phase 1: `pstree`, `netscan`, session management, findings log — Linux and Windows
+- [x] Phase 1.5: `vol_hidden_processes` (pslist/pstree vs psscan), `vol_hidden_modules`
+      (lsmod vs check_modules) — DKOM and self-hiding-module detection
+- [x] Phase 1.6: `vol_timeline` — evidence-based chronological timeline
+- [x] Phase 2: `malfind` wired into a tool — memory injection detection
+- [x] Phase 2.5: `modules` wired into a tool — Windows kernel module enumeration
+- [x] Phase 2.6: `ssdt` wired into a tool — Windows SSDT hook analysis
+- [x] Phase 2.7: `vol_windows_investigate_hidden` — Windows hidden process correlation
+- [x] Phase 3: `vol_report` — structured JSON case report from stored evidence
+- [x] Phase 3.5: Evidence Integrity Layer — SHA-256 hashing and `evidence_verify`
+- [ ] Phase 4: Eric Zimmerman tools (MFTECmd, AmcacheParser, PECmd) as a
+      second tool family for disk artifacts — separate backend image
+      stage (.NET runtime), separate `filters/` modules, separate MCP
+      tools. No changes needed to the Volatility code above.
+- [ ] Phase 5: oletools for malicious-document triage
 
-### SHA-256 Hashing
-Every raw Volatility evidence record is canonicalized into a deterministic JSON representation (independent of dictionary key ordering, whitespace, or mutable metadata like timestamps). This payload is hashed using SHA-256 and stored as integrity_hash in the database.
+## Tech stack
 
-### Evidence Verification
-You can verify the cryptographic integrity of any evidence record using the evidence_verify tool. This tool enforces session isolation, reads the record directly from the database, recomputes the SHA-256 hash, and compares it to the stored hash.
-
-It returns one of three statuses:
-* erified: The recomputed hash matches the stored hash perfectly. The evidence is intact.
-* integrity_failure: The recomputed hash does not match. The evidence record (raw data or derived attributes) has been modified or corrupted since it was stored.
-* unverified: The record was collected before the integrity feature was implemented (legacy data) and lacks a stored hash.
-
-### Limitations
-Cryptographic integrity only proves that the record in the SQLite database has not changed since it was generated by the Volatility plugin. It does not prove that the original memory image itself was authentic, nor does it protect against tampering that occurred prior to memory acquisition.
+- **Language:** Python 3.10+
+- **Framework:** FastMCP (`mcp.server.fastmcp`)
+- **Database:** SQLite (`sqlite3`, built-in)
+- **Execution backend:** Docker container running Volatility 3
+- **Testing:** pytest — 152 tests, 100% passing, ~95% overall coverage
