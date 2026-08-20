@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS plugin_cache (
     plugin_run_id INTEGER,
     rows_json     TEXT NOT NULL,
     created_at    TEXT NOT NULL,
-    UNIQUE(session_id, plugin, args_hash)
+    image_sha256  TEXT,
+    UNIQUE(session_id, plugin, args_hash, image_sha256)
 );
 
 CREATE INDEX IF NOT EXISTS idx_evidence_session    ON evidence(session_id);
@@ -81,6 +82,32 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    
+    # Safe migration for image_content_aware_cache
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(plugin_cache)")
+    columns = [row["name"] for row in cursor.fetchall()]
+    if "image_sha256" not in columns:
+        conn.executescript("""
+            CREATE TABLE plugin_cache_new (
+                cache_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id    TEXT NOT NULL,
+                image         TEXT NOT NULL,
+                plugin        TEXT NOT NULL,
+                args_hash     TEXT NOT NULL,
+                plugin_run_id INTEGER,
+                rows_json     TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                image_sha256  TEXT,
+                UNIQUE(session_id, plugin, args_hash, image_sha256)
+            );
+            INSERT INTO plugin_cache_new (cache_id, session_id, image, plugin, args_hash, plugin_run_id, rows_json, created_at)
+            SELECT cache_id, session_id, image, plugin, args_hash, plugin_run_id, rows_json, created_at FROM plugin_cache;
+            DROP TABLE plugin_cache;
+            ALTER TABLE plugin_cache_new RENAME TO plugin_cache;
+            CREATE INDEX IF NOT EXISTS idx_plugin_cache_lookup ON plugin_cache(session_id, plugin, args_hash);
+        """)
+        
     return conn
 
 
@@ -176,6 +203,7 @@ def get_cached_plugin_result(
     image: str,
     plugin: str,
     args_hash: str,
+    image_sha256: str,
 ) -> dict | None:
     """
     Return cached plugin result or None.
@@ -184,8 +212,8 @@ def get_cached_plugin_result(
     with _conn() as conn:
         row = conn.execute(
             "SELECT rows_json, plugin_run_id FROM plugin_cache "
-            "WHERE session_id = ? AND image = ? AND plugin = ? AND args_hash = ?",
-            (session_id, image, plugin, args_hash),
+            "WHERE session_id = ? AND image = ? AND plugin = ? AND args_hash = ? AND image_sha256 = ?",
+            (session_id, image, plugin, args_hash, image_sha256),
         ).fetchone()
     if not row:
         return None
@@ -200,6 +228,7 @@ def store_plugin_cache(
     image: str,
     plugin: str,
     args_hash: str,
+    image_sha256: str,
     rows: list[dict],
     plugin_run_id: int,
 ) -> None:
@@ -208,9 +237,9 @@ def store_plugin_cache(
     with _conn() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO plugin_cache "
-            "(session_id, image, plugin, args_hash, plugin_run_id, rows_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session_id, image, plugin, args_hash, plugin_run_id, json.dumps(rows), now),
+            "(session_id, image, plugin, args_hash, image_sha256, plugin_run_id, rows_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, image, plugin, args_hash, image_sha256, plugin_run_id, json.dumps(rows), now),
         )
 
 

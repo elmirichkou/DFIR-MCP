@@ -79,14 +79,14 @@ def test_cache_storage_retrieval(temp_db, active_session, sample_volatility_rows
     args_hash = evidence_store.hash_args(["--test"])
     
     # Before cache
-    cached = evidence_store.get_cached_plugin_result(active_session, "test.raw", "win_pstree", args_hash)
+    cached = evidence_store.get_cached_plugin_result(active_session, "test.raw", "win_pstree", args_hash, "dummy_hash")
     assert cached is None
     
     # Store cache
-    evidence_store.store_plugin_cache(active_session, "test.raw", "win_pstree", args_hash, rows, 1)
+    evidence_store.store_plugin_cache(active_session, "test.raw", "win_pstree", args_hash, "dummy_hash", rows, 1)
     
     # After cache
-    cached = evidence_store.get_cached_plugin_result(active_session, "test.raw", "win_pstree", args_hash)
+    cached = evidence_store.get_cached_plugin_result(active_session, "test.raw", "win_pstree", args_hash, "dummy_hash")
     assert cached is not None
     assert cached["plugin_run_id"] == 1
     assert cached["rows"] == rows

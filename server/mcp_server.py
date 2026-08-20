@@ -20,6 +20,8 @@ from filters import correlate as correlate_filter
 import backend_client
 import evidence_store
 import session as case_session
+import image_hasher
+from pathlib import Path
 from filters import hidden_modules as hidden_modules_filter
 from filters import hidden_procs as hidden_procs_filter
 from filters import linux_pstree as linux_pstree_filter
@@ -111,9 +113,16 @@ def _run_plugin_with_evidence(
     is written in that case.
     """
     args_hash = evidence_store.hash_args(extra_args or [])
+    
+    images_dir = Path(__file__).parent.parent / "images"
+    image_path = (images_dir / image).resolve()
+    if not str(image_path).startswith(str(images_dir.resolve())):
+        raise ValueError("Invalid image filename: path traversal detected")
+        
+    image_sha256 = image_hasher.get_image_hash(image_path)
 
     # ── Cache hit ────────────────────────────────────────────────────────────
-    cached = evidence_store.get_cached_plugin_result(session_id, image, plugin_key, args_hash)
+    cached = evidence_store.get_cached_plugin_result(session_id, image, plugin_key, args_hash, image_sha256)
     if cached is not None:
         ev_map = evidence_store.get_entity_evidence_map(session_id, cached["plugin_run_id"])
         return cached["rows"], cached["plugin_run_id"], "cached", ev_map
@@ -138,7 +147,7 @@ def _run_plugin_with_evidence(
     # Cache the raw result so future calls (and vol_investigate_hidden) can
     # skip the Volatility execution entirely.
     evidence_store.store_plugin_cache(
-        session_id, image, plugin_key, args_hash, rows, plugin_run_id
+        session_id, image, plugin_key, args_hash, image_sha256, rows, plugin_run_id
     )
 
     return rows, plugin_run_id, "executed", ev_map

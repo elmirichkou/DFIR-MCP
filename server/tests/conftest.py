@@ -61,6 +61,14 @@ def mock_backend():
     with patch("mcp_server.backend_client.run_plugin") as mock_run:
         yield mock_run
 
+@pytest.fixture(autouse=True)
+def mock_image_hasher_except_in_cache_tests(request):
+    if "test_cache_invalidation" in request.module.__name__:
+        yield None
+    else:
+        with patch("mcp_server.image_hasher.get_image_hash", return_value="dummy_hash") as mock_hash:
+            yield mock_hash
+
 @pytest.fixture
 def mock_active_session(active_session):
     """Mocks mcp_server._require_active_session to return our test session."""
