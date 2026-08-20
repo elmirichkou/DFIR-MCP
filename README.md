@@ -88,11 +88,17 @@ Once connected, in chat:
 
 \```
 Start a session called "case001" for image memdump.raw, os linux
+
 Run pstree and tell me what looks off
+
 Run netscan too
+
 Check for hidden processes
+
 Check for hidden kernel modules
+
 Pin a finding about anything you found
+
 \```
 
 ## MCP tools reference
