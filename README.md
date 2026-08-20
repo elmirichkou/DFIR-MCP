@@ -168,6 +168,16 @@ Every timeline event contains an `evidence_ids` array pointing to the
 exact underlying SQLite evidence records.  No IDs are fabricated — if a
 mapping cannot be established, the array is empty.
 
+## vol_bash — Linux Bash history acquisition
+
+`vol_bash` runs the Volatility 3 `linux.bash.Bash` plugin to extract bash history from memory.
+Only supported for Linux cases.
+
+It retrieves Bash history that is resident in memory, stores raw evidence in the evidence ledger, preserves `evidence_ids` for provenance, and integrates seamlessly with `vol_timeline` and `vol_investigate_hidden`. Cached executions do not rerun Volatility.
+
+**Important Forensic Limitation:**
+Bash history is memory-resident evidence. An empty result does NOT necessarily prove that no commands were executed. History may have been cleared, disabled, unavailable, or simply no longer resident in the captured memory image. An empty list is observed evidence, not proof of absence.
+
 ## vol_malfind — Memory injection detection
 
 `vol_malfind` runs the Volatility 3 `malfind` plugin (supporting both Windows and Linux). It identifies potentially injected or unbacked executable memory regions (such as those created by hollowed processes or injected shellcode).

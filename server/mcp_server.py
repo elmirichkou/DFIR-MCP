@@ -26,6 +26,7 @@ from filters import hidden_modules as hidden_modules_filter
 from filters import hidden_procs as hidden_procs_filter
 from filters import linux_pstree as linux_pstree_filter
 from filters import linux_sockstat as linux_sockstat_filter
+from filters import bash as bash_filter
 from filters import malfind as malfind_filter
 from filters import modules as win_modules_filter
 from filters import netscan as win_netscan_filter
@@ -354,14 +355,10 @@ def vol_bash() -> dict:
         session_id, image, "linux_bash", "vol_bash"
     )
 
-    # We do not have a dedicated bash anomaly filter, so we simply record
-    # the run and return the command count. Evidence is preserved for correlation.
+    analysis = bash_filter.analyze(rows, ev_map)
     case_session.update_plugin_run_anomaly_count(run_id, 0)
 
-    return {
-        "command_count": len(rows),
-        "execution_status": exec_status
-    }
+    return {**analysis, "execution_status": exec_status}
 
 
 

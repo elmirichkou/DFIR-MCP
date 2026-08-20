@@ -25,7 +25,7 @@ _PLUGIN_META: dict[str, tuple[str, str, list[str], list[str]]] = {
     "linux_pslist":        ("process_record",    "process",    ["PID", "Pid"],              ["COMM", "Comm"]),
     "linux_psscan":        ("process_record",    "process",    ["PID", "Pid"],              ["COMM", "Comm"]),
     "linux_pstree":        ("process_record",    "process",    ["PID", "Pid"],              ["COMM", "Comm"]),
-    "linux_bash":          ("bash_history",      "process",    ["Pid", "PID"],              ["Command"]),
+    "linux_bash":          ("bash_history",      "process",    ["Pid", "PID"],              ["Process", "ProcessName", "Command"]),
     "linux_sockstat":      ("network_connection","process",    ["Pid", "PID"],              ["Comm", "COMM"]),
     "linux_lsmod":         ("kernel_module",     "module",     ["Module Name"],             ["Module Name"]),
     "linux_check_modules": ("suspicious_module", "module",     ["Module Name"],             ["Module Name"]),
