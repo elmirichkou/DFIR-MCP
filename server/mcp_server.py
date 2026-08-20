@@ -278,7 +278,7 @@ def vol_malfind() -> dict:
         session_id, image, plugin_key, "vol_malfind"
     )
 
-    analysis = malfind_filter.analyze(rows, ev_map)
+    analysis = malfind_filter.analyze(rows, ev_map, os_type)
     case_session.update_plugin_run_anomaly_count(run_id, analysis["anomaly_count"])
 
     return {**analysis, "execution_status": exec_status}
@@ -486,18 +486,34 @@ def vol_investigate_hidden() -> dict:
     hidden_anomalies = hidden["anomalies"]
 
     if not hidden_anomalies:
-        return {"hidden_count": 0, "profiles": [], "note": "No hidden processes found in the existing evidence."}
+        return {
+            "hidden_count": 0,
+            "profiles": [],
+            "note": "No hidden processes found in the existing evidence.",
+            "data_availability": {
+                "network": False,
+                "bash": False,
+                "malfind": False,
+            },
+        }
 
     # Fetch all potential correlation evidence for the session once
     network_ev = evidence_store.search_evidence(session_id, evidence_type="network_connection")
     bash_ev_all = evidence_store.search_evidence(session_id, plugin="linux_bash")
+    malfind_ev_all = evidence_store.search_evidence(session_id, plugin="linux_malfind")
+
+    network_available = len(network_ev) > 0
     bash_available = len(bash_ev_all) > 0
+    malfind_available = len(malfind_ev_all) > 0
 
     profiles = []
 
     for anomaly in hidden_anomalies:
         pid = anomaly["pid"]
         pid_str = str(pid)
+
+        # Collect all evidence IDs for dedup
+        all_profile_ev_ids = list(anomaly.get("evidence_ids", []))
 
         # Process correlation
         process_info = {
@@ -524,6 +540,7 @@ def vol_investigate_hidden() -> dict:
                     "state": correlate_filter._get(raw, "State", default=""),
                 })
                 net_ev_ids.append(e["evidence_id"])
+                all_profile_ev_ids.append(e["evidence_id"])
 
         # Bash correlation
         bash_cmds = []
@@ -537,6 +554,22 @@ def vol_investigate_hidden() -> dict:
                         "time": correlate_filter._get(raw, "CommandTime", "Command Time", default=""),
                     })
                     bash_ev_ids.append(e["evidence_id"])
+                    all_profile_ev_ids.append(e["evidence_id"])
+
+        # Malfind correlation
+        malfind_regions = []
+        malfind_ev_ids = []
+        if malfind_available:
+            for e in malfind_ev_all:
+                raw = e["raw"]
+                if e.get("entity_id") == pid_str or str(raw.get("Pid", "")) == pid_str or str(raw.get("PID", "")) == pid_str:
+                    malfind_regions.append({
+                        "start_vpn": correlate_filter._get(raw, "Start VPN", "Start", default=""),
+                        "end_vpn": correlate_filter._get(raw, "End VPN", "End", default=""),
+                        "protection": correlate_filter._get(raw, "Protection", "VMA Protection", default=""),
+                    })
+                    malfind_ev_ids.append(e["evidence_id"])
+                    all_profile_ev_ids.append(e["evidence_id"])
 
         # Narrative generation
         observed = [f"PID {pid} appears in psscan evidence but is missing from the active process list (pslist)."]
@@ -546,12 +579,16 @@ def vol_investigate_hidden() -> dict:
             observed.append(f"PID {pid} has {len(bash_cmds)} bash command(s) recorded in evidence.")
         elif not bash_available:
             observed.append("Bash history evidence is not available in the current session store.")
+        if malfind_available and malfind_regions:
+            observed.append(f"PID {pid} has {len(malfind_regions)} suspicious memory region(s) detected by malfind.")
+        elif not malfind_available:
+            observed.append("Malfind evidence is not available in the current session store.")
             
         inferred = []
-        if net_conns or bash_cmds:
-            inferred.append("The combination of DKOM unlinking and recorded network/bash activity strongly warrants further investigation.")
+        if net_conns or bash_cmds or malfind_regions:
+            inferred.append("The combination of DKOM unlinking and recorded network/bash/malfind activity strongly warrants further investigation.")
         else:
-            inferred.append("DKOM unlinking was observed, but no network or bash activity was found in the stored evidence.")
+            inferred.append("DKOM unlinking was observed, but no network, bash, or malfind activity was found in the stored evidence.")
 
         profiles.append({
             "pid": pid,
@@ -565,6 +602,11 @@ def vol_investigate_hidden() -> dict:
                 "commands": bash_cmds,
                 "evidence_ids": bash_ev_ids,
             },
+            "memory_injection_observations": {
+                "regions": malfind_regions,
+                "evidence_ids": malfind_ev_ids,
+            },
+            "evidence_ids": list(set(all_profile_ev_ids)),
             "narrative": {
                 "observed": observed,
                 "inferred": inferred,
@@ -573,7 +615,12 @@ def vol_investigate_hidden() -> dict:
 
     return {
         "profiled_count": len(profiles),
-        "profiles": profiles
+        "profiles": profiles,
+        "data_availability": {
+            "network": network_available,
+            "bash": bash_available,
+            "malfind": malfind_available,
+        },
     }
 
 
@@ -618,13 +665,28 @@ def vol_windows_investigate_hidden() -> dict:
     hidden_anomalies = hidden["anomalies"]
 
     if not hidden_anomalies:
-        return {"hidden_count": 0, "profiles": [], "note": "No hidden processes found in the existing evidence."}
+        return {
+            "hidden_count": 0,
+            "profiles": [],
+            "note": "No hidden processes found in the existing evidence.",
+            "data_availability": {
+                "network": False,
+                "malfind": False,
+                "modules": False,
+                "ssdt": False,
+            }
+        }
 
     # Fetch optional evidence for the session once
     network_ev = evidence_store.search_evidence(session_id, plugin="win_netscan")
     malfind_ev = evidence_store.search_evidence(session_id, plugin="win_malfind")
     modules_ev = evidence_store.search_evidence(session_id, plugin="win_modules")
     ssdt_ev = evidence_store.search_evidence(session_id, plugin="win_ssdt")
+
+    network_available = len(network_ev) > 0
+    malfind_available = len(malfind_ev) > 0
+    modules_available = len(modules_ev) > 0
+    ssdt_available = len(ssdt_ev) > 0
 
     profiles = []
 
@@ -711,14 +773,22 @@ def vol_windows_investigate_hidden() -> dict:
 
         # Narrative generation
         observed = [f"PID {pid} ({process_name}) appears in psscan but not pstree."]
-        if net_conns:
+        if network_available and net_conns:
             observed.append(f"PID {pid} has {len(net_conns)} network connection(s) recorded in evidence.")
-        if malfind_regions:
+        elif not network_available:
+            observed.append("Network evidence is not available in the current session store.")
+        if malfind_available and malfind_regions:
             observed.append(f"PID {pid} has {len(malfind_regions)} suspicious memory region(s) detected by malfind.")
-        if correlated_modules:
+        elif not malfind_available:
+            observed.append("Malfind evidence is not available in the current session store.")
+        if modules_available and correlated_modules:
             observed.append(f"PID {pid} correlates to {len(correlated_modules)} kernel module(s) in evidence.")
-        if correlated_ssdt:
+        elif not modules_available:
+            observed.append("Modules evidence is not available in the current session store.")
+        if ssdt_available and correlated_ssdt:
             observed.append(f"PID {pid} correlates to {len(correlated_ssdt)} SSDT entry/hook(s) in evidence.")
+        elif not ssdt_available:
+            observed.append("SSDT evidence is not available in the current session store.")
 
         inferred = []
         if net_conns or malfind_regions or correlated_modules or correlated_ssdt:
@@ -750,7 +820,13 @@ def vol_windows_investigate_hidden() -> dict:
 
     return {
         "profiled_count": len(profiles),
-        "profiles": profiles
+        "profiles": profiles,
+        "data_availability": {
+            "network": network_available,
+            "malfind": malfind_available,
+            "modules": modules_available,
+            "ssdt": ssdt_available,
+        }
     }
 
 @mcp.tool()
