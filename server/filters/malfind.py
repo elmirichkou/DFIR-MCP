@@ -1,6 +1,6 @@
-def analyze(rows: list[dict], evidence_map: dict[str, list[str]]) -> dict:
+def analyze(rows: list[dict], evidence_map: dict[str, list[str]], os_type: str = "unknown") -> dict:
     """
-    Filter malfind output.
+    Filter malfind output (windows and linux).
     Returns conservative observations without declaring definitive malware.
     """
     findings = []
@@ -15,24 +15,48 @@ def analyze(rows: list[dict], evidence_map: dict[str, list[str]]) -> dict:
             ev_ids = evidence_map.get(pid_str, [])
             
         process = row.get("Process", row.get("COMM", row.get("ImageFileName", "")))
-        start_vpn = row.get("Start VPN", "")
-        end_vpn = row.get("End VPN", "")
-        protection = row.get("Protection", "")
         
+        # Windows typically outputs "Start VPN" and "End VPN"
+        # Linux might output "Start", "End" or just "Address" (or similar)
+        start_vpn = row.get("Start VPN", row.get("Start", ""))
+        end_vpn = row.get("End VPN", row.get("End", ""))
+        address = ""
+        if start_vpn and end_vpn:
+            address = f"{start_vpn} - {end_vpn}"
+        elif start_vpn:
+            address = str(start_vpn)
+            
+        protection = row.get("Protection", row.get("VMA Protection", ""))
         hexdump = row.get("Hexdump", "")
         disasm = row.get("Disasm", "")
         
-        findings.append({
-            "pid": pid,
-            "process": process,
-            "memory_region": f"{start_vpn} - {end_vpn}",
-            "protection": protection,
-            "suspicious_characteristics": ["Injected/unbacked executable memory region detected by malfind"],
-            "disassembly_preview": disasm.split('\n')[:5] if disasm else [],
-            "hexdump_preview": hexdump.split('\n')[:3] if hexdump else [],
+        finding = {
+            "platform": os_type,
             "evidence_ids": ev_ids,
-            "analyst_note": "This is an indicator of potential injection, but must be manually verified. JIT compilers or security products can also produce such regions."
-        })
+            "reason": "suspicious_memory_region"
+        }
+        
+        if pid is not None:
+            finding["pid"] = pid
+        if process is not None and process != "":
+            finding["process"] = process
+        if address:
+            finding["address"] = address
+        if protection:
+            finding["protection"] = protection
+            
+        # Add hexdump and disassembly if available, keeping only a preview to avoid huge payloads
+        if hexdump:
+            finding["hexdump"] = "\n".join(hexdump.split('\n')[:3])
+        if disasm:
+            finding["disassembly"] = "\n".join(disasm.split('\n')[:5])
+            
+        # Handle optional linux/windows specific fields like mapping or file
+        mapping_val = row.get("Mapping", row.get("File", row.get("Name", "")))
+        if mapping_val:
+            finding["mapping"] = mapping_val
+            
+        findings.append(finding)
         
     return {
         "finding_count": len(findings),

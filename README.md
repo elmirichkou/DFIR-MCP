@@ -178,18 +178,73 @@ It retrieves Bash history that is resident in memory, stores raw evidence in the
 **Important Forensic Limitation:**
 Bash history is memory-resident evidence. An empty result does NOT necessarily prove that no commands were executed. History may have been cleared, disabled, unavailable, or simply no longer resident in the captured memory image. An empty list is observed evidence, not proof of absence.
 
-## vol_malfind — Memory injection detection
+## vol_malfind — Suspicious memory region detection
 
-`vol_malfind` runs the Volatility 3 `malfind` plugin (supporting both Windows and Linux). It identifies potentially injected or unbacked executable memory regions (such as those created by hollowed processes or injected shellcode).
+`vol_malfind` runs the Volatility 3 `malfind` plugin to identify memory regions exhibiting characteristics associated with code injection or suspicious executable memory.
 
-**Important Forensic Limitation:**
-Malfind indicators are *not* by themselves proof of malicious activity. JIT compilers (like Java or browsers) and security products often allocate unbacked executable memory regions that look identical to injection. The results of `vol_malfind` are **indicators requiring manual investigation**, not automatic proof of malware.
+### Platform support
 
-The output will contain:
-- PID and Process name
-- The memory region (Start VPN - End VPN)
-- The memory protection (e.g. PAGE_EXECUTE_READWRITE)
-- Disassembly and Hexdump previews of the region
+| Session OS | Backend plugin                  |
+|------------|---------------------------------|
+| Windows    | `windows.malfind.Malfind`       |
+| Linux      | `linux.malfind.Malfind`         |
+
+The tool automatically selects the correct plugin based on the active session's OS. Unsupported OS values are rejected with a structured error.
+
+### What malfind actually detects
+
+Malfind identifies private, executable memory regions that lack a backing file on disk (i.e., they are not mapped from a DLL, shared library, or other file). These regions are commonly associated with:
+- Process hollowing / code injection
+- Reflective DLL injection
+- Shellcode residing in allocated memory
+- Runtime-generated executable code (JIT compilers, managed runtimes)
+
+### Forensic classification
+
+> **Important:** A malfind hit is **NOT** by itself proof of malware or process injection. Legitimate software, security products, JIT/runtime behavior, and other mechanisms can produce suspicious-looking memory regions. Every finding uses the conservative label `suspicious_memory_region` and requires manual analyst triage.
+
+Results distinguish **observed** facts (fields directly present in Volatility output) from **inferred** conclusions. No scoring model or automatic malware declaration is used.
+
+### Normalized output
+
+Each finding contains only fields that are actually present in the raw Volatility row:
+
+| Field         | Description                                           | Platform    |
+|---------------|-------------------------------------------------------|-------------|
+| `pid`         | Process ID                                            | Both        |
+| `process`     | Process name                                          | Both        |
+| `address`     | Memory region (Start VPN – End VPN)                   | Both        |
+| `protection`  | Memory protection flags                               | Both        |
+| `hexdump`     | First 3 lines of hex dump                             | Both        |
+| `disassembly` | First 5 lines of disassembly                          | Both        |
+| `mapping`     | VMA mapping (e.g. `[heap]`, `[stack]`)                | Linux       |
+| `platform`    | `"windows"` or `"linux"`                              | Both        |
+| `reason`      | Conservative classification (`suspicious_memory_region`) | Both     |
+| `evidence_ids`| Provenance links to the SQLite evidence store         | Both        |
+
+Missing or absent fields are omitted rather than fabricated.
+
+### Evidence and provenance
+
+Every malfind finding carries real `evidence_ids` linking back to the SQLite evidence store. The complete raw Volatility dictionary is preserved intact. Use `evidence_get(evidence_id)` to retrieve the full original record.
+
+### Caching
+
+Results are cached using the existing image-content-aware cache (SHA-256 of the memory image). A cache hit returns the same `evidence_ids` without re-executing Volatility.
+
+### Correlation and report integration
+
+- **`vol_windows_investigate_hidden()`** automatically correlates stored `win_malfind` evidence by PID when profiling hidden processes.
+- **`vol_investigate_hidden()`** (Linux) does not currently query malfind evidence, but stored `linux_malfind` records remain available for manual analyst queries via `evidence_search`.
+- **`vol_report()`** surfaces malfind evidence in the `injection_indicators` section with provenance. The `data_availability.memory_injection_scan` flag honestly reports whether malfind evidence was collected. Missing malfind evidence is never silently interpreted as "no injection detected."
+
+### Limitations and false positives
+
+- Results depend on the quality and compatibility of the memory image and Volatility symbols.
+- JIT compilers (Java, .NET CLR, V8/SpiderMonkey), security products (EDR, AV), and legitimate software that allocates executable memory will produce findings indistinguishable from injection.
+- Linux `malfind` output may contain fewer fields than the Windows equivalent depending on the Volatility 3 version and kernel profile.
+- An empty malfind result does **not** prove that no injection occurred — advanced techniques (e.g., remapping protections post-injection) may evade detection.
+
 
 ## vol_modules — Windows kernel module enumeration
 
