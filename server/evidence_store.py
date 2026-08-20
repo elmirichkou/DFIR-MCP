@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     entity_name   TEXT,
     attributes    TEXT NOT NULL DEFAULT '{}',
     raw           TEXT NOT NULL,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    integrity_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS plugin_cache (
@@ -83,6 +84,13 @@ def _conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     
+    # Safe migration for integrity_hash
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(evidence)")
+    columns = [row["name"] for row in cursor.fetchall()]
+    if "integrity_hash" not in columns:
+        conn.executescript("ALTER TABLE evidence ADD COLUMN integrity_hash TEXT;")
+        
     # Safe migration for image_content_aware_cache
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(plugin_cache)")
@@ -245,6 +253,22 @@ def store_plugin_cache(
 
 # ─────────────────────────── Evidence records ─────────────────────────────────
 
+def compute_evidence_hash(plugin: str, evidence_type: str, entity_type: str, entity_id: str | None, entity_name: str | None, attributes: dict, raw: dict) -> str:
+    """Compute a deterministic SHA-256 hash from identity-bearing fields."""
+    canonical = {
+        "plugin": plugin,
+        "evidence_type": evidence_type,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "entity_name": entity_name,
+        "attributes": attributes,
+        "raw": raw,
+    }
+    payload = json.dumps(canonical, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+
 def store_plugin_evidence(
     session_id: str,
     plugin_run_id: int,
@@ -282,15 +306,16 @@ def store_plugin_evidence(
             ev_id = f"ev-{uuid.uuid4().hex[:8]}"
             entity_id, entity_name = _extract_entity(plugin, row)
             attributes = _extract_attributes(plugin, row)
+            integrity_hash = compute_evidence_hash(plugin, evidence_type, entity_type, entity_id, entity_name, attributes, row)
             conn.execute(
                 "INSERT INTO evidence "
                 "(evidence_id, session_id, plugin_run_id, plugin, tool, evidence_type, "
-                " entity_type, entity_id, entity_name, attributes, raw, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " entity_type, entity_id, entity_name, attributes, raw, created_at, integrity_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ev_id, session_id, plugin_run_id, plugin, tool,
                     evidence_type, entity_type, entity_id, entity_name,
-                    json.dumps(attributes), json.dumps(row), now,
+                    json.dumps(attributes), json.dumps(row), now, integrity_hash
                 ),
             )
             if entity_id is not None:
@@ -324,6 +349,7 @@ def get_evidence(evidence_id: str) -> dict | None:
     d = dict(row)
     d["attributes"] = json.loads(d["attributes"])
     d["raw"] = json.loads(d["raw"])
+    d["integrity_status"] = "unverified" if d.get("integrity_hash") is None else "hashed"
     return d
 
 
@@ -368,5 +394,50 @@ def search_evidence(
         d = dict(row)
         d["attributes"] = json.loads(d["attributes"])
         d["raw"] = json.loads(d["raw"])
+        d["integrity_status"] = "unverified" if d.get("integrity_hash") is None else "hashed"
         result.append(d)
     return result
+
+
+def verify_evidence(evidence_id: str, session_id: str) -> dict:
+    """
+    Verify the cryptographic integrity of a stored evidence record.
+    Returns: {"evidence_id": str, "valid": bool | None, "algorithm": "sha256", "status": str}
+    """
+    record = get_evidence(evidence_id)
+    if record is None or record["session_id"] != session_id:
+        return {"error": f"Evidence record not found: {evidence_id}", "status": "not_found"}
+
+    stored_hash = record.get("integrity_hash")
+    if stored_hash is None:
+        return {
+            "evidence_id": evidence_id,
+            "valid": None,
+            "algorithm": "sha256",
+            "status": "unverified"
+        }
+
+    computed_hash = compute_evidence_hash(
+        record["plugin"],
+        record["evidence_type"],
+        record["entity_type"],
+        record.get("entity_id"),
+        record.get("entity_name"),
+        record["attributes"],
+        record["raw"]
+    )
+
+    if computed_hash == stored_hash:
+        return {
+            "evidence_id": evidence_id,
+            "valid": True,
+            "algorithm": "sha256",
+            "status": "verified"
+        }
+    else:
+        return {
+            "evidence_id": evidence_id,
+            "valid": False,
+            "algorithm": "sha256",
+            "status": "integrity_failure"
+        }

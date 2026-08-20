@@ -870,6 +870,17 @@ def evidence_get(evidence_id: str) -> dict:
 
 @mcp.tool()
 @_handle_errors
+def evidence_verify(evidence_id: str) -> dict:
+    """
+    Verify the cryptographic integrity of a stored evidence record.
+    Returns the integrity status: 'verified', 'integrity_failure', or 'unverified'.
+    """
+    active = _require_active_session()
+    return evidence_store.verify_evidence(evidence_id, active["id"])
+
+
+@mcp.tool()
+@_handle_errors
 def evidence_search(
     entity_type: str | None = None,
     entity_id: str | None = None,
