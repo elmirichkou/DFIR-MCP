@@ -40,6 +40,13 @@ from datetime import datetime, timezone
 # timestamp.  Only plugins listed here produce temporal events.
 _TIMESTAMP_FIELDS: dict[str, list[str]] = {
     "linux_bash": ["CommandTime", "Command Time"],
+    "win_pstree": ["CreateTime", "Create Time", "Created"],
+    "win_psscan": ["CreateTime", "Create Time", "Created"],
+    "win_pslist": ["CreateTime", "Create Time", "Created"],
+    "linux_pslist": ["StartTime", "Start Time"],
+    "linux_psscan": ["StartTime", "Start Time"],
+    "linux_pstree": ["StartTime", "Start Time"],
+    "win_netscan": ["Created", "CreateTime", "Create Time"],
 }
 
 
@@ -188,8 +195,9 @@ def build_timeline(
             "entity_name": ev.get("entity_name"),
             "description": _describe_event(ev),
             "plugin": plugin,
-            "evidence_ids": [ev_id],
+            "evidence_ids": list(set([ev_id])),
             "is_temporal": parsed_ts is not None,
+            "classification": "observed",
         }
 
         if parsed_ts is not None:
