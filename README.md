@@ -86,28 +86,14 @@ Add to your MCP client config:
 
 Once connected, in chat:
 
-```
-Start a session called "phantom" for image dump_srv.mem, os linux
+\```
+Start a session called "case001" for image memdump.raw, os linux
 Run pstree and tell me what looks off
 Run netscan too
 Check for hidden processes
 Check for hidden kernel modules
 Pin a finding about anything you found
-```
-
-Both Windows and Linux images are supported — `session_create` takes an
-`os` argument ("linux" or "windows") that determines which Volatility
-plugins and filter heuristics get used underneath. The tool names stay
-the same either way (`vol_pstree`, `vol_netscan`); the dispatch to the
-right OS-specific plugin happens inside `mcp_server.py`.
-
-`vol_hidden_processes` and `vol_hidden_modules` go beyond a single
-plugin call — they cross-reference a linked-list walk (which a rootkit
-can unlink itself from) against a direct memory scan (which can't be
-fooled that way). This is the same class of technique used to find a
-DKOM-hidden process and a self-hiding kernel module in prior memory
-forensics work — it's worth running these on any case where something
-in `pstree`/`netscan` doesn't add up.
+\```
 
 ## MCP tools reference
 
